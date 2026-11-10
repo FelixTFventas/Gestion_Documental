@@ -9,11 +9,14 @@ export const STATUS: Record<Status, string> = { DRAFT: 'Borrador', PENDING: 'Pen
 export const ACTIONS: Record<string, string> = { CREATED: 'Documento creado', SAVED: 'Borrador guardado', CORRECTED: 'Nueva versión preparada', SENT: 'Enviado', RECEIVED: 'Recepción confirmada', VISA: 'Visto bueno registrado', RETURNED: 'Devuelto para corrección', AUTHORIZED: 'Autorizado por Gerencia', FILE_ADDED: 'Archivo adjuntado', FILE_REMOVED: 'Archivo retirado' };
 export type Egreso = { date?: string; payment?: 'EFECTIVO' | 'TRANSFERENCIA'; owner?: string; tenant?: string; payee?: string; amount?: string; concept?: string; receiver?: string; identity?: string; ct?: string; description?: string };
 export type Doc = { id: string; number: string; subject: string; kind: 'EGRESO' | 'UPLOAD'; origin_area: Area; responsible_area: Area; status: Status; current_version: number; current_step: string | null; revision: number; created_at: string; updated_at: string };
+export type DocumentListItem = Doc & { visible_version: number; authorized_by: string | null; authorized_at: string | null; assigned_at: string | null };
+export type DocumentCounts = { inbox: string; circulation: string; finished: string; sent: string; mine: string; total: string };
 export type Version = { document_id: string; number: number; subject: string; data: Egreso; amount: string | null; frozen: boolean; created_at: string };
 export type StoredFile = { id: string; storage_key: string; original_name: string; mime: string; size: number; sha256: string; role: 'MAIN' | 'ATTACHMENT' };
 export type Decision = { id: string; kind: 'VISA' | 'AUTHORIZE'; area_id: Area; actor_name: string; created_at: string; version: number };
 export type HistoryEvent = { id: string; action: string; actor_name: string; area_id: Area; version: number; note: string; details: Record<string, string>; created_at: string };
-export type Detail = { doc: Doc; version: Version; versions: { number: number; frozen: boolean }[]; files: StoredFile[]; decisions: Decision[]; events: HistoryEvent[]; returnArea: Area | null };
+export type CirculationStep = { id: string; version: number; sender_area: Area; recipient_area: Area; sender_name: string; note: string; sent_at: string; received_at: string | null; closed_at: string | null; outcome: 'FORWARDED' | 'RETURNED' | 'AUTHORIZED' | null; assignment_action: 'SENT' | 'RETURNED' };
+export type Detail = { doc: Doc; version: Version; versions: { number: number; frozen: boolean }[]; files: StoredFile[]; decisions: Decision[]; events: HistoryEvent[]; returnArea: Area | null; steps: CirculationStep[]; closure: Decision | null };
 export const consecutive = (number: string | number) => `EG-${String(number).padStart(6, '0')}`;
 export function cop(value?: string | null) {
   if (!value) return '—';

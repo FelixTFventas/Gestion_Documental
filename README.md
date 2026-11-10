@@ -80,11 +80,24 @@ Se incluyen un egreso remitido de Arriendos a Dirección Administrativa con sopo
 5. **Enviar a un área** congela la versión, cierra el paso anterior y abre una tarea pendiente para la destinataria.
 6. La receptora pulsa **Marcar como recibido**. Dirección Administrativa y Contabilidad pueden registrar explícitamente su **Visto bueno**, independiente de la recepción. El PDF no inventa revisiones ni firmas.
 7. **Devolver** exige explicar qué falta y asigna la tarea al remitente de ese paso. Un área intermedia puede aclarar mediante nota y reenviar la misma versión, o devolver al origen. Solo el origen corrige campos o archivos cuando tiene el documento devuelto; la primera edición crea una nueva versión y conserva las anteriores.
-8. Gerencia recibe, revisa en vista previa y puede **Autorizar**. La decisión cierra el paso y pertenece a esa versión exacta. No ejecuta pagos ni equivale a firma electrónica. En un PDF cargado, la decisión se consulta en el detalle y el historial: el archivo original no se modifica.
+8. Gerencia recibe, revisa en vista previa y puede **Autorizar**. La decisión cierra el paso y **finaliza automáticamente el trámite**, que pasa a **Finalizados**. No hay un segundo botón para cerrar. La autorización pertenece a esa versión exacta; no ejecuta pagos ni equivale a firma electrónica. En un PDF cargado, la decisión se consulta en el detalle y el historial: el archivo original no se modifica.
 
 El recorrido es libre: no se impone la participación de Tesorería o Cartera. Ejemplo: Arriendos → Dirección Administrativa → Contabilidad → Gerencia.
 
 El consecutivo es un identificador interno de búsqueda, no numeración fiscal ni garantía de secuencia sin saltos. PostgreSQL puede reservar números o consumirlos en transacciones que luego se revierten.
+
+### Dónde está el documento y cómo termina
+
+- **Por atender:** tareas asignadas a tu área, con la acción siguiente indicada.
+- **En circulación:** documentos visibles que siguen abiertos, incluso cuando el paso actual corresponde a otra área. No incluye borradores ni finalizados.
+- **Finalizados:** documentos autorizados por Gerencia, con ubicación **Archivo**, usuario y fecha de cierre y sin acciones pendientes.
+- **Documentos de mi área:** conserva la consulta de borradores, propios y recibidos. **Enviados** y la **Vista general** de Gerencia siguen disponibles.
+
+La tabla muestra **¿Dónde está?**, **¿Qué sigue?** y la situación del trámite. El detalle incorpora el **recorrido real**: cada envío y devolución aparece en su orden, con área, versión y fecha; se marca el paso actual y, al finalizar, el destino Archivo. No se dibujan pasos obligatorios por áreas que nunca participaron. Las revisiones se consultan separadas para la versión seleccionada.
+
+El cierre muestra **Trámite finalizado**, quién autorizó, cuándo y qué versión. Si se consulta una versión anterior, se sigue mostrando el cierre general con su versión exacta, pero **no se atribuye la autorización a esa versión anterior**. La descarga e impresión continúan disponibles para quienes tengan permiso.
+
+**No requiere nuevas migraciones para el cierre visible:** se deriva de la autorización ya registrada (`AUTHORIZED`), cuyo paso ya se cierra en la misma transacción. No se crea un estado o una decisión duplicada. Los documentos previamente autorizados aparecen automáticamente en Finalizados; no se altera su contenido, fecha ni historial.
 
 ### Versiones y decisiones
 
@@ -114,6 +127,7 @@ Cualquier cambio de cuenta revoca todas sus sesiones; no elimina usuarios, docum
 - Las imágenes y originales se conservan sin modificación. Retirar un soporte del borrador no elimina el objeto que necesitan versiones históricas. Los fallos de vinculación limpian el archivo recién escrito; un corte de proceso puede dejar un objeto huérfano. No hay purga automática: establecer política de retención y limpieza de huérfanos con respaldo.
 - El adaptador de esta entrega es **disco privado**. Desplegar en un servidor Node con volumen persistente; no usar un filesystem efímero/serverless. Para varias réplicas se requiere volumen privado compartido o incorporar un adaptador de objetos privado. No está implementado S3.
 - Contraseñas bcrypt, sesiones de 8 horas con token aleatorio almacenado como hash, cookie HttpOnly/SameSite Strict y Secure con HTTPS, control de origen y límite de intentos de acceso. Configurar además límites de solicitudes en el proxy para exposición pública.
+- Los formularios de escritura usan POST y esperan a que sus controles estén listos. El inicio de sesión tiene un respaldo POST nativo para que un envío temprano nunca ponga las credenciales en la URL.
 - Autorización y transiciones validadas otra vez dentro de transacciones. Bloqueo de documento, revisión optimista y restricción de paso activo impiden doble envío/autorización; una petición obsoleta devuelve 409, sin aplicar eventos parciales.
 - Triggers protegen contenido enviado, relación de adjuntos e historial. Usar una cuenta PostgreSQL de ejecución con privilegios mínimos, distinta del propietario de migraciones. No conceder permisos de propietario/superusuario a la aplicación en producción.
 - Logs de errores sin contenido de formularios, archivos, notas ni credenciales. Configurar proxy y observabilidad para no registrar cuerpos ni cookies.

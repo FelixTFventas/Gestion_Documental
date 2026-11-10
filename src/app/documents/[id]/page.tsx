@@ -10,6 +10,6 @@ export default async function DetailPage({ params, searchParams }: { params: Pro
   const user = await requireUser(); const { id } = await params; const query = await searchParams;
   try {
     const data = await detail(await database(), user, id, query.version ? Number(query.version) : undefined);
-    return <Shell user={user}><DocumentDetail key={`${data.doc.revision}-${data.version.number}`} data={JSON.parse(JSON.stringify(data))} user={user} /></Shell>;
+    return <Shell user={user}><DocumentDetail key={`${data.doc.id}-${data.doc.revision}-${data.version.number}`} data={JSON.parse(JSON.stringify(data))} user={user} /></Shell>;
   } catch (error) { if (error instanceof AppError && error.status === 404) notFound(); throw error; }
 }

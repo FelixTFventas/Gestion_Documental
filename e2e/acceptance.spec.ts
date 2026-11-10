@@ -51,9 +51,13 @@ test('egreso completo: PDF, soporte, devolución, corrección, revisiones y auto
   await expect(page.getByRole('tab', { name: 'Soportes (1)' })).toBeVisible();
   await action(page, 'Enviar a un área', 'Revisión inicial', 'administrativa');
   await expect(page.locator('.status-summary .status')).toHaveText('Pendiente de recepción');
+  await expect(page.getByRole('region', { name: 'Ruta de circulación' }).locator('[aria-current=step]')).toContainText('Dirección Administrativa');
+  await expect(page.locator('.current-task')).toContainText('Dirección Administrativa: confirmar recepción');
   await signIn(page, 'administrativa'); await page.goto(path); await receive(page);
   await action(page, 'Devolver', 'Detallar el concepto del servicio');
   await expect(page.locator('.status-summary .status')).toHaveText('Devuelto para corrección');
+  await expect(page.locator('.route-counts')).toContainText('1 devolución');
+  await expect(page.getByRole('region', { name: 'Ruta de circulación' }).locator('[aria-current=step]')).toContainText('Arriendos');
   await signIn(page, 'arriendos'); await page.goto(path);
   await page.getByRole('textbox', { name: 'Concepto *', exact: true }).fill('Concepto corregido: revisión detallada del servicio ficticio');
   await page.getByRole('button', { name: 'Guardar borrador', exact: true }).click();
@@ -75,14 +79,36 @@ test('egreso completo: PDF, soporte, devolución, corrección, revisiones y auto
   expect(staleAuth.status()).toBe(409);
   expect((await (await page.request.get(base)).json()).doc.revision).toBe(management.doc.revision);
   await action(page, 'Autorizar');
-  await expect(page.locator('.status-summary .status')).toHaveText('Autorizado');
+  await expect(page.locator('.status-summary .status')).toHaveText('Finalizado');
+  await expect(page.getByRole('heading', { name: 'Trámite finalizado', exact: true })).toBeVisible();
+  await expect(page.locator('.completion-card')).toContainText('Gerencia · Demo');
+  await expect(page.locator('.completion-card')).toContainText('Sin acciones pendientes.');
+  await expect(page.locator('.status-summary')).toContainText('Ubicación final');
+  await expect(page.locator('.status-summary')).not.toContainText('Responsable actual');
+  await expect(page.getByRole('button', { name: 'Enviar a un área' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Autorizar', exact: true })).toHaveCount(0);
+  await expect(page.locator('.route-archive')).toContainText('Trámite finalizado');
+  await page.getByRole('region', { name: 'Ruta de circulación' }).scrollIntoViewIfNeeded();
+  await expect(page.locator('.route-archive')).toBeInViewport();
+  await expect(page.locator('.route-track [aria-current=step]')).toHaveCount(0);
   const authPdf = await page.request.get(`${pdfUrl!.split('?')[0]}?version=2`); expect(authPdf.status()).toBe(200);
   await page.getByRole('tab', { name: 'Historial', exact: true }).click();
   await expect(page.locator('.timeline').getByText('Detallar el concepto del servicio', { exact: true })).toBeVisible();
   await expect(page.getByText('Visto bueno registrado', { exact: true })).toHaveCount(2);
   await expect(page.getByText('Recepción confirmada', { exact: true })).toHaveCount(4);
-  await expect(page.getByText('Autorizado por Gerencia', { exact: true })).toHaveCount(1);
+  await expect(page.locator('.timeline').getByText('Autorizado por Gerencia', { exact: true })).toHaveCount(1);
   await page.screenshot({ path: 'test-results/tramite-autorizado.png', fullPage: true });
+  const subject = management.doc.subject;
+  await page.getByRole('link', { name: 'Ver finalizados', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Finalizados', exact: true })).toBeVisible();
+  const archivedRow = page.getByRole('row').filter({ has: page.getByRole('link', { name: new RegExp(subject) }) });
+  await expect(archivedRow).toContainText('Archivo');
+  await expect(archivedRow).toContainText('Sin acciones pendientes');
+  await expect(archivedRow).toContainText('Autorizado por Gerencia');
+  await page.goto(`${path}?version=1`);
+  await expect(page.locator('.completion-card')).toContainText('v2');
+  await expect(page.locator('.summary-card')).toContainText('Sin autorización');
+  await expect(page.locator('.version-decisions .recorded')).toHaveCount(0);
   const stranger = await browser.newContext(); const strangerPage = await stranger.newPage();
   await signIn(strangerPage, 'cartera');
   const forbiddenPdf = await strangerPage.request.get(`${pdfUrl!.split('?')[0]}?version=2`); expect(forbiddenPdf.status()).toBe(404);
@@ -124,5 +150,25 @@ test('la bandeja se adapta a móvil sin desbordar la pantalla', async ({ page })
   await signIn(page, 'arriendos');
   await expect(page.getByRole('heading', { name: 'Todo en orden.' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.getByRole('link', { name: 'Finalizados', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Finalizados', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await page.screenshot({ path: 'test-results/inicio-movil.png', fullPage: true });
+});
+
+test('el formulario de ingreso usa POST incluso antes de cargar JavaScript', async ({ page }) => {
+  const html = await (await page.request.get('/login')).text();
+  expect(html).toContain('method="post"');
+  expect(html).toContain('action="/api/login"');
+  const response = await page.request.post('/api/login', {
+    headers: { Origin: origin }, form: { email: 'arriendos@demo.ftf.test', password }, maxRedirects: 0
+  });
+  expect(response.status()).toBe(303);
+  expect(response.headers().location).toBe(`${origin}/`);
+  expect(response.headers()['set-cookie']).toContain('HttpOnly');
+  expect(response.headers().location).not.toContain('password');
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Todo en orden.' })).toBeVisible();
+  const foreign = await page.request.post('/api/login', { headers: { Origin: 'https://otro.example' }, form: { email: 'arriendos@demo.ftf.test', password } });
+  expect(foreign.status()).toBe(403);
 });

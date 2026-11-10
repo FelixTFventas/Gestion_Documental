@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Database, Sql } from './db';
 import { assert } from './errors';
-import { AREAS, type Area, type Detail, type Doc, type Egreso, type User, type Version, type StoredFile, type Decision, type HistoryEvent } from './types';
+import { AREAS, type Area, type Detail, type Doc, type Egreso, type User, type Version, type StoredFile, type Decision, type HistoryEvent, type CirculationStep, type DocumentCounts, type DocumentListItem } from './types';
 
 const text = z.string().trim().max(500).optional();
 const fields = z.object({
@@ -174,18 +174,33 @@ export async function act(db: Database, actorId: string, id: string, revision: n
     await touch(sql, doc);
   });
 }
+const visibilitySql = `($1='gerencia' OR d.origin_area=$1 OR EXISTS(SELECT 1 FROM steps s WHERE s.document_id=d.id AND (s.sender_area=$1 OR s.recipient_area=$1)))`;
+export async function documentCounts(db: Database, user: User): Promise<DocumentCounts> {
+  if (!user.area_id) return { inbox: '0', circulation: '0', finished: '0', sent: '0', mine: '0', total: '0' };
+  const [counts] = await db.query<DocumentCounts>(`SELECT
+    count(*) FILTER (WHERE d.responsible_area=$1 AND d.status IN ('PENDING','RECEIVED','RETURNED')) AS inbox,
+    count(*) FILTER (WHERE d.status IN ('PENDING','RECEIVED','RETURNED')) AS circulation,
+    count(*) FILTER (WHERE d.status='AUTHORIZED') AS finished,
+    count(*) FILTER (WHERE EXISTS(SELECT 1 FROM steps s WHERE s.document_id=d.id AND s.sender_area=$1)) AS sent,
+    count(*) FILTER (WHERE d.origin_area=$1 OR EXISTS(SELECT 1 FROM steps s WHERE s.document_id=d.id AND s.recipient_area=$1)) AS mine,
+    count(*) AS total FROM documents d WHERE ${visibilitySql}`, [user.area_id]);
+  return counts;
+}
 export async function listDocuments(db: Database, user: User, filter = 'mine', search = '', state = '') {
   if (!user.area_id) return [];
-  const where = `($1='gerencia' OR d.origin_area=$1 OR EXISTS(SELECT 1 FROM steps s WHERE s.document_id=d.id AND (s.sender_area=$1 OR s.recipient_area=$1)))`;
   const clauses: Record<string, string> = {
     inbox: "d.responsible_area=$1 AND d.status IN ('PENDING','RECEIVED','RETURNED')",
+    circulation: "d.status IN ('PENDING','RECEIVED','RETURNED')",
+    finished: "d.status='AUTHORIZED'",
     sent: 'EXISTS(SELECT 1 FROM steps s WHERE s.document_id=d.id AND s.sender_area=$1)',
     mine: '(d.origin_area=$1 OR EXISTS(SELECT 1 FROM steps s WHERE s.document_id=d.id AND s.recipient_area=$1))',
     all: "$1='gerencia'"
   };
-  return db.query<Doc>(`SELECT d.*,visible.subject FROM documents d JOIN LATERAL (
-    SELECT v.subject FROM versions v WHERE v.document_id=d.id AND ($1='gerencia' OR $1=d.origin_area OR EXISTS(SELECT 1 FROM steps s WHERE s.document_id=d.id AND s.version=v.number AND (s.sender_area=$1 OR s.recipient_area=$1))) ORDER BY v.number DESC LIMIT 1
-  ) visible ON true WHERE ${where} AND ${clauses[filter] || clauses.mine} AND ($2='' OR visible.subject ILIKE $2 OR ('EG-' || lpad(d.number::text,6,'0')) ILIKE $2) AND ($3='' OR d.status=$3) ORDER BY d.updated_at DESC LIMIT 200`, [user.area_id, search ? `%${search.slice(0, 200)}%` : '', state]);
+  return db.query<DocumentListItem>(`SELECT d.*,visible.subject,visible.number AS visible_version,decision.actor_name AS authorized_by,decision.created_at AS authorized_at,step.sent_at AS assigned_at FROM documents d JOIN LATERAL (
+    SELECT v.subject,v.number FROM versions v WHERE v.document_id=d.id AND ($1='gerencia' OR $1=d.origin_area OR EXISTS(SELECT 1 FROM steps s WHERE s.document_id=d.id AND s.version=v.number AND (s.sender_area=$1 OR s.recipient_area=$1))) ORDER BY v.number DESC LIMIT 1
+  ) visible ON true LEFT JOIN decisions decision ON decision.document_id=d.id AND decision.version=d.current_version AND decision.kind='AUTHORIZE'
+  LEFT JOIN steps step ON step.id=d.current_step
+  WHERE ${visibilitySql} AND ${clauses[filter] || clauses.mine} AND ($2='' OR visible.subject ILIKE $2 OR ('EG-' || lpad(d.number::text,GREATEST(6,length(d.number::text)),'0')) ILIKE $2) AND ($3='' OR d.status=$3) ORDER BY d.updated_at DESC LIMIT 200`, [user.area_id, search ? `%${search.slice(0, 200)}%` : '', state]);
 }
 export async function detail(db: Database, user: User, id: string, requestedVersion?: number): Promise<Detail> {
   const doc = await accessibleDoc(db, user, id);
@@ -198,6 +213,9 @@ export async function detail(db: Database, user: User, id: string, requestedVers
   const files = await db.query<StoredFile>('SELECT f.*,vf.role FROM version_files vf JOIN files f ON f.id=vf.file_id WHERE vf.document_id=$1 AND vf.version=$2 ORDER BY vf.role DESC,f.created_at', [id, selected]);
   const decisions = await db.query<Decision>('SELECT * FROM decisions WHERE document_id=$1 AND version=$2 ORDER BY created_at', [id, selected]);
   const events = await db.query<HistoryEvent>('SELECT * FROM events WHERE document_id=$1 ORDER BY sequence', [id]);
-  const [step] = doc.current_step ? await db.query<Step>('SELECT * FROM steps WHERE id=$1', [doc.current_step]) : [];
-  return { doc, version, versions, files, decisions, events, returnArea: step?.sender_area ?? null };
+  const steps = await db.query<CirculationStep>(`SELECT s.*,e.action AS assignment_action,e.actor_name AS sender_name FROM steps s
+    JOIN events e ON e.step_id=s.id AND e.action IN ('SENT','RETURNED') WHERE s.document_id=$1 ORDER BY e.sequence`, [id]);
+  const [closure] = doc.status === 'AUTHORIZED' ? await db.query<Decision>("SELECT * FROM decisions WHERE document_id=$1 AND version=$2 AND kind='AUTHORIZE'", [id, doc.current_version]) : [];
+  const step = steps.find(s => s.id === doc.current_step);
+  return { doc, version, versions, files, decisions, events, returnArea: step?.sender_area ?? null, steps, closure: closure ?? null };
 }

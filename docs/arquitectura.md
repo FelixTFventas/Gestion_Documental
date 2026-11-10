@@ -23,6 +23,14 @@ Las asignaciones de devolución se almacenan también como pasos para conservar 
 
 No existe cierre por pago, ni una aprobación implícita por recepción o reenvío. No se permite corregir un documento autorizado: una eventual reapertura será una función futura con reglas explícitas, no una mutación silenciosa del egreso aprobado.
 
+### Proyección operativa de finalización
+
+La interfaz presenta el estado `AUTHORIZED` como **Finalizado**, manteniendo **Autorizado por Gerencia** como decisión del documento. No se añade `CLOSED`, ni una segunda operación susceptible de dejar desincronizados decisión y cierre. La autorización existente ya cierra el paso dentro de su transacción. Las bandejas y contadores filtran desde esa misma fuente y con la misma política de acceso documental.
+
+`closure` identifica la autorización de la **versión vigente**; `decisions` conserva únicamente las decisiones de la **versión consultada**. Esto permite comunicar el cierre general al consultar v1 sin afirmar que la autorización de v2 pertenece a v1. El detalle conserva ambas referencias explícitas. `visible_version` permite que las bandejas muestren la última versión permitida a un participante, no el número de un borrador nuevo no remitido.
+
+El recorrido se obtiene de `steps` enlazados a los eventos de envío/devolución y ordenados por su secuencia. Incluye repeticiones de áreas y retornos, no una lista institucional fija. Al finalizar se muestra Archivo como destino de consulta, no como otra dependencia, asignación ni almacenamiento público. La ubicación final sustituye a la etiqueta de responsable actual, para no aparentar tareas pendientes de Gerencia.
+
 ## Congelación e historial
 
 - `documents` contiene el consecutivo, estado y asignación actuales, además de `revision` para concurrencia.

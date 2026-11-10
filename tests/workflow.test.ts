@@ -4,13 +4,14 @@ import { randomUUID } from 'node:crypto';
 import { hash } from 'bcryptjs';
 import { connectDatabase, embeddedDatabase, type Database } from '../src/lib/db';
 import { migrate } from '../scripts/migrate';
-import { act, attachFile, createDocument, detail, listDocuments, saveDocument, removeFile } from '../src/lib/documents';
+import { act, attachFile, createDocument, detail, documentCounts, listDocuments, saveDocument, removeFile } from '../src/lib/documents';
 import { manageUser } from '../src/lib/admin';
 import { login, sessionUser } from '../src/lib/auth';
 import { AREAS, cop, type Area, type Doc, type Egreso, type StoredFile, type User } from '../src/lib/types';
 import { generatePDF } from '../src/lib/pdf';
 import { storeFile, discardStored } from '../src/lib/storage';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { currentTask, workflowSummary } from '../src/lib/tracking';
 
 let db: Database;
 const users = {} as Record<Area | 'admin', User>;
@@ -94,6 +95,11 @@ describe('Recorrido Arriendos → Dirección Administrativa → Contabilidad →
     await step('gerencia', id, 'authorize');
     const result = await detail(db, users.arriendos, id);
     expect(result.doc.status).toBe('AUTHORIZED');
+    expect(result.closure?.version).toBe(2);
+    expect(result.closure?.actor_name).toBe(users.gerencia.name);
+    expect(result.steps.every(s => s.closed_at)).toBe(true);
+    expect(result.steps.map(s => s.recipient_area)).toEqual(['administrativa','arriendos','administrativa','contabilidad','gerencia']);
+    expect(result.steps[1].assignment_action).toBe('RETURNED');
     expect(result.decisions.filter(d => d.kind === 'AUTHORIZE')).toHaveLength(1);
     expect(result.files[0].id).toBe(file.id);
     expect(result.events.filter(e => e.action === 'RECEIVED')).toHaveLength(4);
@@ -102,6 +108,7 @@ describe('Recorrido Arriendos → Dirección Administrativa → Contabilidad →
     const original = await detail(db, users.arriendos, id, 1);
     expect(original.version.data.concept).toBe(full.concept);
     expect(original.decisions).toHaveLength(0);
+    expect(original.closure?.version).toBe(2); // El cierre del trámite no autoriza la versión consultada v1.
     await expect(db.query('DELETE FROM events WHERE document_id=$1', [id])).rejects.toThrow('inmutable');
     await expect(step('gerencia', id, 'authorize')).rejects.toThrow('autorizada');
     const pdf = await generatePDF(result);
@@ -127,6 +134,52 @@ describe('Recorrido Arriendos → Dirección Administrativa → Contabilidad →
     await attachFile(db, users.arriendos.id, id, d.revision, await fakeFile(), 'ATTACHMENT');
     expect((await snapshot(id)).current_version).toBe(2);
     expect((await detail(db, users.arriendos, id, 1)).files).toHaveLength(0);
+  });
+});
+
+describe('Finalización visible y bandejas operativas', () => {
+  it('autorizar cierra automáticamente y archiva sin crear otro estado, respetando permisos y contadores', async () => {
+    const ownBefore = await documentCounts(db, users.arriendos);
+    const foreignBefore = await documentCounts(db, users.cartera);
+    const id = await egreso();
+    expect((await listDocuments(db, users.arriendos, 'circulation')).some(d => d.id === id)).toBe(false);
+    await step('arriendos', id, 'send', 'gerencia');
+    expect((await listDocuments(db, users.arriendos, 'circulation')).some(d => d.id === id)).toBe(true);
+    await step('gerencia', id, 'receive');
+    expect((await detail(db, users.gerencia, id)).closure).toBeNull();
+    expect((await listDocuments(db, users.gerencia, 'finished')).some(d => d.id === id)).toBe(false);
+    await expect(step('gerencia', id, 'close')).rejects.toThrow('Acción desconocida');
+    await step('gerencia', id, 'authorize');
+    const archived = (await listDocuments(db, users.arriendos, 'finished')).find(d => d.id === id)!;
+    expect(archived.status).toBe('AUTHORIZED');
+    expect(archived.visible_version).toBe(1);
+    expect(archived.authorized_by).toBe(users.gerencia.name);
+    expect(archived.authorized_at).toBeTruthy();
+    expect(workflowSummary(archived)).toMatchObject({ finished: true, location: 'Archivo', task: 'Sin acciones pendientes', label: 'Finalizado' });
+    expect((await listDocuments(db, users.gerencia, 'inbox')).some(d => d.id === id)).toBe(false);
+    expect((await listDocuments(db, users.arriendos, 'circulation')).some(d => d.id === id)).toBe(false);
+    expect((await listDocuments(db, users.cartera, 'finished')).some(d => d.id === id)).toBe(false);
+    expect(await listDocuments(db, users.admin, 'finished')).toEqual([]);
+    expect(Number((await documentCounts(db, users.arriendos)).finished)).toBe(Number(ownBefore.finished) + 1);
+    expect(await documentCounts(db, users.cartera)).toEqual(foreignBefore);
+    expect((await documentCounts(db, users.admin)).total).toBe('0');
+    const result = await detail(db, users.arriendos, id);
+    expect(result.steps.map(s => s.recipient_area)).toEqual(['gerencia']); // Sin inventar áreas obligatorias.
+    expect(result.steps[0].outcome).toBe('AUTHORIZED');
+    expect(result.events.filter(e => e.action === 'AUTHORIZED')).toHaveLength(1);
+    await expect(saveDocument(db, users.gerencia.id, id, result.doc.revision, 'No editable', full)).rejects.toThrow('autorizada');
+  });
+
+  it.each([
+    ['DRAFT', 'arriendos', 'Arriendos', 'Completar y enviar el borrador'],
+    ['PENDING', 'administrativa', 'Dirección Administrativa', 'Confirmar recepción'],
+    ['RECEIVED', 'gerencia', 'Gerencia', 'Revisar y decidir la autorización'],
+    ['RETURNED', 'arriendos', 'Arriendos', 'Corregir y reenviar'],
+    ['RETURNED', 'administrativa', 'Dirección Administrativa', 'Aclarar o devolver al origen']
+  ] as const)('explica ubicación y siguiente tarea para %s / %s', (status, area, location, task) => {
+    const doc = { status, origin_area: 'arriendos' as const, responsible_area: area };
+    expect(workflowSummary(doc)).toMatchObject({ finished: false, location, task });
+    expect(currentTask(doc, area)).toBe(`Tu área: ${task.toLowerCase()}`);
   });
 });
 
